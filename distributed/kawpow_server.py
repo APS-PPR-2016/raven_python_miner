@@ -4,10 +4,11 @@ KAWPOW Mining Server (Coordinator & DAG Distributor)
 1. Connects to the upstream Stratum pool (e.g. rvn.2miners.com:6060).
 2. Generates Keccak-512 light cache and full DAG (cached to disk as .cache_rvn_epoch_{epoch}_dag.bin).
 3. Serves the full DAG over high-throughput HTTP for network clients to download/cache.
-4. Manages connected mining clients (kawpow_client.py) over an async TCP protocol:
+4. Manages connected mining clients (kawpow_client.py) over native Python TLS 1.3:
    - Partitions non-overlapping 64-bit nonce ranges per worker.
-   - Broadcasts new pool jobs with sub-millisecond latency.
+   - Broadcasts new pool jobs and epoch transition notifications.
    - Collects client-submitted shares into an instant queue and relays them to the Stratum pool.
+5. Handles epoch transitions dynamically: triggers GPU DAG regeneration and notifies clients.
 """
 
 import asyncio
@@ -24,11 +25,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from distributed.engine_core import (
     get_cache_num_items, get_dataset_num_items, compile_dag_engine
 )
+from distributed.tls_utils import get_server_ssl_context
 import pycuda.driver as cuda
 import pycuda.autoinit
 
 class KawpowMiningServer:
-    def __init__(self, pool_host, pool_port, wallet, worker, http_port=8080, client_port=8088, device_id=0):
+    def __init__(self, pool_host, pool_port, wallet, worker, http_port=8080, client_port=8088,
+                 device_id=0, use_tls=True, tls_cert="server.crt", tls_key="server.key"):
         self.pool_host = pool_host
         self.pool_port = pool_port
         self.wallet = wallet
@@ -36,10 +39,15 @@ class KawpowMiningServer:
         self.http_port = http_port
         self.client_port = client_port
         self.device_id = device_id
+        self.use_tls = use_tls
+        self.tls_cert = tls_cert
+        self.tls_key = tls_key
 
         self.current_epoch = None
         self.dag_file = None
         self.dag_bytes = 0
+        self.dag_ready = False
+        self.dag_generating = False
 
         # Pool state
         self.pool_writer = None
@@ -66,26 +74,29 @@ class KawpowMiningServer:
 
     def ensure_dag_on_disk(self, epoch, seed_bytes=None):
         """Generates the DAG on GPU if not already on disk, and saves it for network distribution."""
-        if self.current_epoch == epoch and self.dag_file and os.path.exists(self.dag_file):
-            return
-
-        self.current_epoch = epoch
+        final_file = f".cache_rvn_epoch_{epoch}_dag.bin"
         num_cache_items = get_cache_num_items(epoch)
         full_items = get_dataset_num_items(epoch)
         total_half_items = full_items * 2
         dag_bytes = total_half_items * 64
+
+        self.current_epoch = epoch
         self.dag_bytes = dag_bytes
-        self.dag_file = f".cache_rvn_epoch_{epoch}_dag.bin"
+        self.dag_file = final_file
 
         cache_bytes = num_cache_items * 64
         cache_file = f".cache_rvn_epoch_{epoch}_keccak.bin"
 
         print(f"[Server] Epoch {epoch}: DAG size is {dag_bytes / (1024*1024*1024):.2f} GB ({dag_bytes:,} bytes)")
 
-        if os.path.exists(self.dag_file) and os.path.getsize(self.dag_file) == dag_bytes:
-            print(f"[Server] Found verified DAG file on disk: {self.dag_file}")
+        if os.path.exists(final_file) and os.path.getsize(final_file) == dag_bytes:
+            print(f"[Server] Found verified DAG file on disk: {final_file}")
+            self.dag_ready = True
+            self.dag_generating = False
             return
 
+        self.dag_generating = True
+        self.dag_ready = False
         print(f"[Server] DAG file not found on disk. Synthesizing on GPU {self.device_id}...")
         dev = cuda.Device(self.device_id)
         dag_mod = compile_dag_engine(dev)
@@ -118,7 +129,8 @@ class KawpowMiningServer:
             cache_host.tofile(cache_file)
             print(f"[Server] Saved light cache to {cache_file}")
 
-        # 2. Synthesize DAG in chunks and stream directly to disk file
+        # 2. Synthesize DAG in chunks and stream directly to temporary disk file
+        tmp_file = f"{final_file}.tmp"
         dag_gpu = cuda.mem_alloc(dag_bytes)
         threads = 256
         chunk_size = 4000000  # ~256 MB per chunk
@@ -136,11 +148,11 @@ class KawpowMiningServer:
             pct = ((start_item + count) / total_half_items) * 100
             print(f"[Server] DAG generation: {pct:5.1f}% complete ({chunk_idx + 1}/{total_chunks})", end="\r")
 
-        print(f"\n[Server] DAG synthesis complete in {time.time() - t0:.2f}s! Exporting to disk: {self.dag_file}...")
+        print(f"\n[Server] DAG synthesis complete in {time.time() - t0:.2f}s! Exporting to disk: {final_file}...")
         cache_gpu.free()
 
         # Stream copy from GPU to disk in 256MB blocks
-        with open(self.dag_file, 'wb') as f:
+        with open(tmp_file, 'wb') as f:
             chunk_bytes = 256 * 1024 * 1024
             buf = np.zeros(chunk_bytes // 4, dtype=np.uint32)
             total_copied = 0
@@ -153,8 +165,16 @@ class KawpowMiningServer:
                 total_copied += to_copy
                 print(f"[Server] Exported {total_copied / (1024*1024):.0f} MB / {dag_bytes / (1024*1024):.0f} MB to disk...", end="\r")
 
-        print(f"\n[Server] Successfully saved verified DAG file to {self.dag_file} ({os.path.getsize(self.dag_file):,} bytes)")
         dag_gpu.free()
+
+        # Atomic rename to final verified file
+        if os.path.exists(final_file):
+            os.remove(final_file)
+        os.replace(tmp_file, final_file)
+
+        print(f"\n[Server] Successfully saved verified DAG file to {final_file} ({os.path.getsize(final_file):,} bytes)")
+        self.dag_ready = True
+        self.dag_generating = False
 
     # --- HTTP File Server for DAG Distribution ---
     async def handle_http_request(self, reader, writer):
@@ -180,14 +200,16 @@ class KawpowMiningServer:
                 resp_data = json.dumps({
                     'epoch': self.current_epoch,
                     'dag_bytes': self.dag_bytes,
-                    'filename': self.dag_file
+                    'filename': self.dag_file,
+                    'ready': self.dag_ready,
+                    'generating': self.dag_generating
                 }).encode('utf-8')
                 writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(resp_data)).encode() + b"\r\n\r\n" + resp_data)
                 await writer.drain()
             elif path.startswith('/dag/download'):
-                if not self.dag_file or not os.path.exists(self.dag_file):
-                    not_found = b"HTTP/1.1 404 Not Found\r\n\r\nDAG not ready yet"
-                    writer.write(not_found)
+                if self.dag_generating or not self.dag_ready or not self.dag_file or not os.path.exists(self.dag_file):
+                    not_ready = b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nContent-Length: 26\r\n\r\nDAG generating, retry in 5s"
+                    writer.write(not_ready)
                     await writer.drain()
                 else:
                     file_size = os.path.getsize(self.dag_file)
@@ -213,7 +235,7 @@ class KawpowMiningServer:
             else:
                 writer.write(b"HTTP/1.1 404 Not Found\r\n\r\nInvalid endpoint")
                 await writer.drain()
-        except Exception as e:
+        except Exception:
             pass
         finally:
             try:
@@ -222,25 +244,28 @@ class KawpowMiningServer:
             except Exception:
                 pass
 
-    # --- Client TCP Coordinator ---
+    # --- Client Coordinator (TLS 1.3 Protected) ---
     async def handle_client(self, reader, writer):
         client_id = self.next_client_id
         self.next_client_id += 1
         addr = writer.get_extra_info('peername')
         client_info = {'writer': writer, 'worker_name': f'worker_{client_id}', 'gpus': 1, 'shares': 0, 'id': client_id}
         self.clients[client_id] = client_info
-        print(f"[Server] Client {client_id} connected from {addr}")
+        print(f"[Server] Client {client_id} connected securely from {addr}")
 
         try:
             # Send initial state and nonce partition
-            # Each client is assigned a 40-bit partition prefix (client_id << 40)
             nonce_prefix = client_id << 40
             init_msg = {
                 'type': 'init',
                 'c_id': client_id,
+                'client_id': client_id,
                 'np': nonce_prefix,
+                'nonce_prefix': nonce_prefix,
                 'ep': self.current_epoch,
-                'dh': f"http://localhost:{self.http_port}/dag/download"
+                'epoch': self.current_epoch,
+                'dh': f"http://localhost:{self.http_port}/dag/download",
+                'dag_http_url': f"http://localhost:{self.http_port}/dag/download"
             }
             writer.write(json.dumps(init_msg).encode() + b'\n')
             await writer.drain()
@@ -250,10 +275,15 @@ class KawpowMiningServer:
                 job_msg = {
                     'type': 'job',
                     'jid': self.current_job,
+                    'job_id': self.current_job,
                     'bl': self.current_blob,
+                    'blob': self.current_blob,
                     't': self.current_target,
+                    'target': self.current_target,
                     'h': self.current_height,
-                    'ep': self.current_epoch
+                    'height': self.current_height,
+                    'ep': self.current_epoch,
+                    'epoch': self.current_epoch
                 }
                 writer.write(json.dumps(job_msg).encode() + b'\n')
                 await writer.drain()
@@ -270,20 +300,24 @@ class KawpowMiningServer:
                     client_info['gpus'] = msg.get('gpus', 1)
                     print(f"[Server] Client {client_id} registered as '{client_info['worker_name']}' ({client_info['gpus']} GPU(s))")
 
-                elif mtype == 'share':
-                    # Client found a valid share -> put on queue for instant pool submission
+                elif mtype in ('share', 'sh'):
+                    job_id = msg.get('jid') or msg.get('job_id')
+                    nonce = msg.get('n') or msg.get('nonce')
+                    header = msg.get('h') or msg.get('header')
+                    mix_hash = msg.get('m') or msg.get('mix_hash')
+
                     share_data = {
                         'client_id': client_id,
                         'worker_name': client_info['worker_name'],
-                        'job_id': msg['jid'],
-                        'nonce': msg['n'],
-                        'header': msg['h'],
-                        'mix_hash': msg['m']
+                        'job_id': job_id,
+                        'nonce': nonce,
+                        'header': header,
+                        'mix_hash': mix_hash
                     }
                     await self.share_queue.put(share_data)
 
-                elif mtype == 'hashrate':
-                    hr = msg.get('hr', 0.0)
+                elif mtype in ('hashrate', 'hr'):
+                    hr = msg.get('hr') or msg.get('hashrate', 0.0)
                     client_info['hashrate'] = hr
 
         except (ConnectionResetError, ConnectionError, asyncio.IncompleteReadError):
@@ -324,25 +358,36 @@ class KawpowMiningServer:
             finally:
                 self.share_queue.task_done()
 
-    async def broadcast_job(self):
-        """Broadcasts active pool job to all connected clients."""
-        if not self.clients or not self.current_job:
+    async def broadcast_message(self, msg_dict):
+        """Broadcasts arbitrary JSON message to all connected clients."""
+        if not self.clients:
             return
-        job_msg = {
-            'type': 'job',
-            'job_id': self.current_job,
-            'blob': self.current_blob,
-            'target': self.current_target,
-            'height': self.current_height,
-            'epoch': self.current_epoch
-        }
-        msg_bytes = json.dumps(job_msg).encode() + b'\n'
+        msg_bytes = json.dumps(msg_dict).encode() + b'\n'
         for cid, c in list(self.clients.items()):
             try:
                 c['writer'].write(msg_bytes)
                 await c['writer'].drain()
             except Exception:
                 pass
+
+    async def broadcast_job(self):
+        """Broadcasts active pool job to all connected clients."""
+        if not self.clients or not self.current_job:
+            return
+        job_msg = {
+            'type': 'job',
+            'jid': self.current_job,
+            'job_id': self.current_job,
+            'bl': self.current_blob,
+            'blob': self.current_blob,
+            't': self.current_target,
+            'target': self.current_target,
+            'h': self.current_height,
+            'height': self.current_height,
+            'ep': self.current_epoch,
+            'epoch': self.current_epoch
+        }
+        await self.broadcast_message(job_msg)
 
     # --- Stratum Pool Connection Session ---
     async def connect_to_pool(self):
@@ -389,12 +434,22 @@ class KawpowMiningServer:
                                 if len(params) >= 6:
                                     self.current_height = int(params[5])
 
-                                epoch = self.get_epoch(self.current_height)
+                                new_epoch = self.get_epoch(self.current_height)
                                 seed_bytes = params[2] if len(params) >= 3 else None
-                                print(f"[Pool] Job: id={self.current_job}, height={self.current_height}, epoch={epoch}")
+                                print(f"[Pool] Job: id={self.current_job}, height={self.current_height}, epoch={new_epoch}")
+
+                                # Handle epoch change dynamically
+                                if self.current_epoch is not None and new_epoch != self.current_epoch:
+                                    print(f"[Server] *** EPOCH TRANSITION DETECTED: {self.current_epoch} -> {new_epoch} ***")
+                                    await self.broadcast_message({
+                                        'type': 'epoch_transition',
+                                        'ep': new_epoch,
+                                        'epoch': new_epoch,
+                                        'status': 'generating'
+                                    })
 
                                 # Ensure DAG file is generated on disk
-                                self.ensure_dag_on_disk(epoch, seed_bytes)
+                                self.ensure_dag_on_disk(new_epoch, seed_bytes)
 
                                 # Broadcast job to all connected clients
                                 await self.broadcast_job()
@@ -424,9 +479,14 @@ class KawpowMiningServer:
         http_server = await asyncio.start_server(self.handle_http_request, '0.0.0.0', self.http_port)
         print(f"[Server] HTTP DAG Server listening on http://0.0.0.0:{self.http_port}")
 
-        # 2. Start Client Coordinator TCP server
-        client_server = await asyncio.start_server(self.handle_client, '0.0.0.0', self.client_port)
-        print(f"[Server] Mining Client Coordinator listening on port {self.client_port}")
+        # 2. Start Client Coordinator TCP server (Protected by Native Python TLS 1.3)
+        if self.use_tls:
+            ssl_ctx = get_server_ssl_context(self.tls_cert, self.tls_key)
+            client_server = await asyncio.start_server(self.handle_client, '0.0.0.0', self.client_port, ssl=ssl_ctx)
+            print(f"[Server] Mining Client Coordinator listening on port {self.client_port} (TLS 1.3 encrypted)")
+        else:
+            client_server = await asyncio.start_server(self.handle_client, '0.0.0.0', self.client_port)
+            print(f"[Server] Mining Client Coordinator listening on port {self.client_port} (plaintext)")
 
         # 3. Start share submission consumer queue
         asyncio.create_task(self.process_share_queue())
@@ -442,10 +502,24 @@ if __name__ == "__main__":
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP port for DAG downloads")
     parser.add_argument("--client-port", type=int, default=8088, help="TCP port for mining clients")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device ID for DAG generation")
+    parser.add_argument("--no-tls", action="store_true", help="Disable TLS on client coordinator port")
+    parser.add_argument("--tls-cert", default="server.crt", help="Path to TLS certificate")
+    parser.add_argument("--tls-key", default="server.key", help="Path to TLS private key")
     args = parser.parse_args()
 
     host, port = args.pool.split(':')
-    server = KawpowMiningServer(host, int(port), args.wallet, args.worker, args.http_port, args.client_port, args.gpu)
+    server = KawpowMiningServer(
+        pool_host=host,
+        pool_port=int(port),
+        wallet=args.wallet,
+        worker=args.worker,
+        http_port=args.http_port,
+        client_port=args.client_port,
+        device_id=args.gpu,
+        use_tls=not args.no_tls,
+        tls_cert=args.tls_cert,
+        tls_key=args.tls_key
+    )
 
     try:
         asyncio.run(server.start())
