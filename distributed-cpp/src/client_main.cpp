@@ -72,10 +72,13 @@ public:
         }
     }
 
+    std::string cache_dir = ".";
+
     void download_dag_if_needed(uint32_t epoch) {
         auto info = kawpow::get_epoch_info(epoch);
-        if (fs::exists(info.filename) && fs::file_size(info.filename) == info.dag_bytes) {
-            std::cout << "[Client] Found cached DAG file on local disk: " << info.filename
+        std::string cached = kawpow::find_cached_dag_path(epoch, cache_dir);
+        if (!cached.empty()) {
+            std::cout << "[Client] Found cached DAG file on local disk: " << cached
                       << " (" << (info.dag_bytes / (1024 * 1024 * 1024)) << " GB)\n[Client] Loading DAG to gpu..\n";
             return;
         }
@@ -315,6 +318,7 @@ int main(int argc, char* argv[]) {
                       << "  --worker <name>           Worker rig name (default: client_rig_1)\n"
                       << "  --batch-size <size>       Nonces per batch (default: 524288)\n"
                       << "  --gpus <id1,id2,...>      Comma-separated GPU indices (default: 0)\n"
+                      << "  --cache-dir <path>        Directory for DAG binary cache files (default: .)\n"
                       << "  --help, -h                Show this help message\n";
             return 0;
         } else if (arg == "--server" && i + 1 < argc) {
@@ -330,6 +334,8 @@ int main(int argc, char* argv[]) {
             client.worker_name = argv[++i];
         } else if (arg == "--batch-size" && i + 1 < argc) {
             client.batch_size = std::stoi(argv[++i]);
+        } else if (arg == "--cache-dir" && i + 1 < argc) {
+            client.cache_dir = argv[++i];
         } else if (arg == "--gpus" && i + 1 < argc) {
             std::string g = argv[++i];
             client.gpu_ids.clear();

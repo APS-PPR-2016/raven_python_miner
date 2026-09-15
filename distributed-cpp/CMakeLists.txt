@@ -12,32 +12,45 @@ else()
     add_compile_options(-Wall -Wextra -O3)
 endif()
 
+set(BIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bin")
+file(MAKE_DIRECTORY "${BIN_DIR}")
+
+# Force all built libraries and executables into bin/
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${BIN_DIR}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${BIN_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${BIN_DIR}")
+foreach(CONF DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CONF} "${BIN_DIR}")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CONF} "${BIN_DIR}")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CONF} "${BIN_DIR}")
+endforeach()
+
 # Global Include Directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../raven_miner_cpp/libraries/lib-fg-cuda/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../raven_miner_cpp/libraries/lib-ethash
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraries/lib-fg-cuda/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraries/lib-ethash
     ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
 # 1. Keccak Library
 add_library(keccak STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../raven_miner_cpp/libraries/lib-ethash/keccak/keccak.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../raven_miner_cpp/libraries/lib-ethash/keccak/keccakf800.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../raven_miner_cpp/libraries/lib-ethash/keccak/keccakf1600.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraries/lib-ethash/keccak/keccak.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraries/lib-ethash/keccak/keccakf800.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraries/lib-ethash/keccak/keccakf1600.c
 )
 target_include_directories(keccak PUBLIC 
-    ${CMAKE_CURRENT_SOURCE_DIR}/../raven_miner_cpp/libraries/lib-ethash/keccak
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraries/lib-ethash/keccak
     ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
 # 2. FG CUDA Library (NVML dynamic discovery, temperature, power, fan & memory telemetry)
 add_library(fg_cuda STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../raven_miner_cpp/libraries/lib-fg-cuda/src/cuda_nvml.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../raven_miner_cpp/libraries/lib-fg-cuda/src/gpu_resource.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraries/lib-fg-cuda/src/cuda_nvml.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraries/lib-fg-cuda/src/gpu_resource.cpp
 )
 target_include_directories(fg_cuda PUBLIC 
-    ${CMAKE_CURRENT_SOURCE_DIR}/../raven_miner_cpp/libraries/lib-fg-cuda/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/libraries/lib-fg-cuda/include
 )
 
 # Common engine core components

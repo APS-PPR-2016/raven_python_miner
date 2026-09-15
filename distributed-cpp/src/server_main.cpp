@@ -62,6 +62,9 @@ public:
     kawpow::net::TcpSocket pool_sock;
     std::mutex pool_sock_mutex;
 
+    std::string cache_dir = ".";
+    kawpow::DagGenerator dag_mgr;
+
     void broadcast_job() {
         simple_json::Value job_msg(std::map<std::string, simple_json::Value>{
             {"type", "job"},
@@ -100,8 +103,9 @@ public:
         }
 
         if (path == "/dag/info") {
-            auto info = kawpow::get_epoch_info(current_epoch.load());
-            bool ready = kawpow::is_dag_cached(info.epoch);
+            uint32_t ep = current_epoch.load();
+            auto info = kawpow::get_epoch_info(ep);
+            bool ready = dag_mgr.is_ready(ep);
             simple_json::Value resp(std::map<std::string, simple_json::Value>{
                 {"epoch", static_cast<int64_t>(info.epoch)},
                 {"dag_bytes", static_cast<int64_t>(info.dag_bytes)},
@@ -113,12 +117,14 @@ public:
                                  std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n";
             client.send_string(header + body);
         } else if (path.rfind("/dag/download", 0) == 0) {
-            auto info = kawpow::get_epoch_info(current_epoch.load());
-            if (!kawpow::is_dag_cached(info.epoch)) {
+            uint32_t ep = current_epoch.load();
+            auto info = kawpow::get_epoch_info(ep);
+            std::string file_path = dag_mgr.get_dag_path(ep);
+            if (!dag_mgr.is_ready(ep) || file_path.empty()) {
                 std::string err = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nContent-Length: 26\r\n\r\nDAG generating, retry in 5s";
                 client.send_string(err);
             } else {
-                std::ifstream f(info.filename, std::ios::binary);
+                std::ifstream f(file_path, std::ios::binary);
                 if (!f) {
                     std::string not_found = "HTTP/1.1 404 Not Found\r\n\r\nDAG file missing";
                     client.send_string(not_found);
@@ -371,7 +377,13 @@ public:
                             }
 
                             std::cout << "[Pool] Job: id=" << jid << ", height=" << h << ", epoch=" << ep << "\n";
-                            kawpow::ensure_dag_on_disk(ep, device_id);
+
+                            // Trigger DAG generation asynchronously only if missing; ignores repeat jobs for same epoch
+                            dag_mgr.on_pool_job(ep, device_id, cache_dir, [this](uint32_t ready_ep) {
+                                std::cout << "[Server] DAG for epoch " << ready_ep << " is ready! Broadcasting update to clients...\n";
+                                broadcast_job();
+                            });
+
                             broadcast_job();
                         }
                     }
@@ -402,6 +414,7 @@ int main(int argc, char* argv[]) {
                       << "  --http-port <port>     HTTP port for DAG file serving (default: 8080)\n"
                       << "  --client-port <port>   TCP port for mining client coordinator (default: 8088)\n"
                       << "  --gpu <id>             GPU device ID for local DAG generation (default: 0)\n"
+                      << "  --cache-dir <path>     Directory for DAG binary cache files (default: .)\n"
                       << "  --help, -h             Show this help message\n";
             return 0;
         } else if (arg == "--pool" && i + 1 < argc) {
@@ -421,6 +434,8 @@ int main(int argc, char* argv[]) {
             srv.client_port = std::stoi(argv[++i]);
         } else if (arg == "--gpu" && i + 1 < argc) {
             srv.device_id = std::stoi(argv[++i]);
+        } else if (arg == "--cache-dir" && i + 1 < argc) {
+            srv.cache_dir = argv[++i];
         }
     }
 
@@ -434,6 +449,7 @@ int main(int argc, char* argv[]) {
     srv.connect_stratum_pool();
 
     srv.running = false;
+    srv.dag_mgr.stop();
     if (t_http.joinable()) t_http.join();
     if (t_coord.joinable()) t_coord.join();
     if (t_shares.joinable()) t_shares.join();
