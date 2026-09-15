@@ -1,0 +1,11 @@
+build/
+bin/
+*.exe
+*.lib
+*.pdb
+*.ilk
+*.obj
+*.idb
+.vs/
+CMakeSettings.json
+out/
