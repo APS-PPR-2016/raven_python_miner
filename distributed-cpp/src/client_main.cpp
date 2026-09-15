@@ -38,6 +38,7 @@ public:
 
     std::atomic<bool> running{true};
     std::atomic<bool> dag_loaded{false};
+    std::atomic<bool> is_loading_dag{false};
     std::atomic<bool> mining_paused{true};
     uint32_t client_id = 0;
     uint64_t nonce_prefix = 0;
@@ -157,10 +158,18 @@ public:
     }
 
     void prepare_epoch(uint32_t epoch) {
+        // Prevent concurrent or duplicate DAG loads for the same epoch
+        bool expected = false;
+        if (!is_loading_dag.compare_exchange_strong(expected, true)) {
+            if (epoch == active_epoch) {
+                return; // Same epoch is already being loaded, do NOT restart!
+            }
+        }
+
         mining_paused.store(true);
         dag_loaded.store(false);
-        std::cout << "[Client] Preparing epoch " << epoch << "...\n";
         active_epoch = epoch;
+        std::cout << "[Client] Preparing epoch " << epoch << "...\n";
 
         // 1. Ensure DAG binary is present on local disk (either cached or downloaded via HTTP)
         download_dag_if_needed(epoch);
@@ -168,6 +177,7 @@ public:
         std::string dag_path = kawpow::find_cached_dag_path(epoch, cache_dir);
         if (dag_path.empty()) {
             std::cerr << "[Client] Error: DAG file for epoch " << epoch << " not found on disk.\n";
+            is_loading_dag.store(false);
             return;
         }
 
@@ -175,16 +185,23 @@ public:
 
         // 2. Load DAG into GPU VRAM for each GPU before starting/resuming mining loop
         std::cout << "[Client] Loading DAG into VRAM for " << gpu_dag_buffers.size() << " GPU(s)...\n";
+        bool all_loaded = true;
         for (auto& buf : gpu_dag_buffers) {
             if (!buf->load_dag_from_file(dag_path, info.dag_bytes)) {
                 std::cerr << "[Client] Failed to load DAG into GPU " << buf->gpu_id << " VRAM!\n";
-                return;
+                all_loaded = false;
+                break;
             }
         }
 
-        std::cout << "[Client] All GPUs loaded with Epoch " << epoch << " DAG! Ready to mine.\n";
-        dag_loaded.store(true);
-        mining_paused.store(false);
+        if (all_loaded) {
+            std::cout << "[Client] All GPUs loaded with Epoch " << epoch << " DAG! Ready to mine.\n";
+            dag_loaded.store(true);
+            mining_paused.store(false);
+        } else {
+            std::cerr << "[Client] DAG loading failed! Mining remains paused.\n";
+        }
+        is_loading_dag.store(false);
     }
 
     void share_sender_loop() {
@@ -321,7 +338,7 @@ public:
                     nonce_prefix = static_cast<uint64_t>(msg.contains("np") ? msg["np"].as_int64() : msg["nonce_prefix"].as_int64());
                     uint32_t ep = static_cast<uint32_t>(msg.contains("ep") ? msg["ep"].as_int64() : msg["epoch"].as_int64());
                     std::cout << "[Client] Initialized as Client " << client_id << " (Nonce prefix: 0x" << std::hex << nonce_prefix << std::dec << ")\n";
-                    if (ep != active_epoch || !dag_loaded.load()) {
+                    if (!dag_loaded.load() && !is_loading_dag.load()) {
                         prepare_epoch(ep);
                     }
                 } else if (type == "epoch_transition" || type == "epoch_ready") {
@@ -333,10 +350,6 @@ public:
                     }
                 } else if (type == "job") {
                     uint32_t ep = static_cast<uint32_t>(msg.contains("ep") ? msg["ep"].as_int64() : msg["epoch"].as_int64());
-                    if (ep != active_epoch || !dag_loaded.load()) {
-                        std::cout << "[Client] Received job with new epoch " << ep << ". Loading DAG before mining...\n";
-                        prepare_epoch(ep);
-                    }
 
                     {
                         std::lock_guard<std::mutex> lock(job_mutex);
@@ -345,6 +358,14 @@ public:
                         current_job.height = msg.contains("h") ? msg["h"].as_uint64() : msg["height"].as_uint64();
                         current_job.epoch = ep;
                         has_job = true;
+                    }
+
+                    // Only trigger prepare_epoch if epoch changed or not loaded and not currently loading!
+                    if (ep != active_epoch) {
+                        std::cout << "[Client] Received job with new epoch " << ep << ". Switching epoch...\n";
+                        prepare_epoch(ep);
+                    } else if (!dag_loaded.load() && !is_loading_dag.load()) {
+                        prepare_epoch(ep);
                     }
                 }
             }

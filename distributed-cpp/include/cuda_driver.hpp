@@ -72,24 +72,32 @@ public:
 #ifdef _WIN32
         lib_handle = LoadLibraryA("nvcuda.dll");
         if (!lib_handle) return false;
-        #define GET_CUDA_PROC(name) name = reinterpret_cast<pfn_##name>(GetProcAddress(lib_handle, #name))
+        auto get_proc = [this](const char* v2, const char* v1) -> void* {
+            void* p = reinterpret_cast<void*>(GetProcAddress(lib_handle, v2));
+            if (!p && v1) p = reinterpret_cast<void*>(GetProcAddress(lib_handle, v1));
+            return p;
+        };
 #else
         lib_handle = dlopen("libcuda.so.1", RTLD_LAZY);
         if (!lib_handle) lib_handle = dlopen("libcuda.so", RTLD_LAZY);
         if (!lib_handle) return false;
-        #define GET_CUDA_PROC(name) name = reinterpret_cast<pfn_##name>(dlsym(lib_handle, #name))
+        auto get_proc = [this](const char* v2, const char* v1) -> void* {
+            void* p = dlsym(lib_handle, v2);
+            if (!p && v1) p = dlsym(lib_handle, v1);
+            return p;
+        };
 #endif
 
-        GET_CUDA_PROC(cuInit);
-        GET_CUDA_PROC(cuDeviceGet);
-        GET_CUDA_PROC(cuDeviceGetName);
-        GET_CUDA_PROC(cuDeviceTotalMem);
-        GET_CUDA_PROC(cuCtxCreate);
-        GET_CUDA_PROC(cuCtxDestroy);
-        GET_CUDA_PROC(cuCtxSetCurrent);
-        GET_CUDA_PROC(cuMemAlloc);
-        GET_CUDA_PROC(cuMemFree);
-        GET_CUDA_PROC(cuMemcpyHtoD);
+        cuInit = reinterpret_cast<pfn_cuInit>(get_proc("cuInit", nullptr));
+        cuDeviceGet = reinterpret_cast<pfn_cuDeviceGet>(get_proc("cuDeviceGet", nullptr));
+        cuDeviceGetName = reinterpret_cast<pfn_cuDeviceGetName>(get_proc("cuDeviceGetName", nullptr));
+        cuDeviceTotalMem = reinterpret_cast<pfn_cuDeviceTotalMem>(get_proc("cuDeviceTotalMem_v2", "cuDeviceTotalMem"));
+        cuCtxCreate = reinterpret_cast<pfn_cuCtxCreate>(get_proc("cuCtxCreate_v2", "cuCtxCreate"));
+        cuCtxDestroy = reinterpret_cast<pfn_cuCtxDestroy>(get_proc("cuCtxDestroy_v2", "cuCtxDestroy"));
+        cuCtxSetCurrent = reinterpret_cast<pfn_cuCtxSetCurrent>(get_proc("cuCtxSetCurrent", nullptr));
+        cuMemAlloc = reinterpret_cast<pfn_cuMemAlloc>(get_proc("cuMemAlloc_v2", "cuMemAlloc"));
+        cuMemFree = reinterpret_cast<pfn_cuMemFree>(get_proc("cuMemFree_v2", "cuMemFree"));
+        cuMemcpyHtoD = reinterpret_cast<pfn_cuMemcpyHtoD>(get_proc("cuMemcpyHtoD_v2", "cuMemcpyHtoD"));
 
         if (!cuInit || cuInit(0) != CUDA_SUCCESS) {
             return false;
@@ -165,8 +173,10 @@ public:
         std::cout << "[GPU " << gpu_id << "] Allocating " << std::fixed << std::setprecision(2)
                   << gb << " GB VRAM on " << device_name << "...\n";
 
-        if (drv.cuMemAlloc(&dag_vram_ptr, expected_size) != CUDA_SUCCESS) {
-            std::cerr << "[GPU " << gpu_id << "] cuMemAlloc failed! Insufficient GPU VRAM for " << gb << " GB DAG.\n";
+        CUresult alloc_res = drv.cuMemAlloc(&dag_vram_ptr, expected_size);
+        if (alloc_res != CUDA_SUCCESS) {
+            std::cerr << "[GPU " << gpu_id << "] cuMemAlloc failed (error code " << alloc_res
+                      << ")! Insufficient GPU VRAM for " << gb << " GB DAG.\n";
             return false;
         }
 
@@ -188,8 +198,10 @@ public:
             size_t bytes_read = static_cast<size_t>(file.gcount());
             if (bytes_read == 0) break;
 
-            if (drv.cuMemcpyHtoD(dag_vram_ptr + total_copied, buffer.data(), bytes_read) != CUDA_SUCCESS) {
-                std::cerr << "\n[GPU " << gpu_id << "] cuMemcpyHtoD failed at offset " << total_copied << "!\n";
+            CUresult cpy_res = drv.cuMemcpyHtoD(dag_vram_ptr + total_copied, buffer.data(), bytes_read);
+            if (cpy_res != CUDA_SUCCESS) {
+                std::cerr << "\n[GPU " << gpu_id << "] cuMemcpyHtoD failed (error code " << cpy_res 
+                          << ") at offset " << total_copied << "!\n";
                 free_dag();
                 return false;
             }
