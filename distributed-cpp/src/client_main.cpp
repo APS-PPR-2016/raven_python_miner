@@ -2,6 +2,7 @@
 #include "dag_generator.hpp"
 #include "network.hpp"
 #include "simple_json.hpp"
+#include "cuda_driver.hpp"
 #include "fgp/cuda/gpu_resource.h"
 
 #include <iostream>
@@ -36,9 +37,13 @@ public:
     uint32_t batch_size = 524288;
 
     std::atomic<bool> running{true};
+    std::atomic<bool> dag_loaded{false};
+    std::atomic<bool> mining_paused{true};
     uint32_t client_id = 0;
     uint64_t nonce_prefix = 0;
     uint32_t active_epoch = 0;
+
+    std::vector<std::unique_ptr<kawpow::cuda::GpuDagBuffer>> gpu_dag_buffers;
 
     std::mutex job_mutex;
     MiningJob current_job;
@@ -78,12 +83,12 @@ public:
         auto info = kawpow::get_epoch_info(epoch);
         std::string cached = kawpow::find_cached_dag_path(epoch, cache_dir);
         if (!cached.empty()) {
-            std::cout << "[Client] Found cached DAG file on local disk: " << cached
-                      << " (" << (info.dag_bytes / (1024 * 1024 * 1024)) << " GB)\n[Client] Loading DAG to gpu..\n";
+            std::cout << "[Client] Found verified DAG file on disk: " << cached
+                      << " (" << (info.dag_bytes / (1024 * 1024 * 1024)) << " GB)\n";
             return;
         }
 
-        std::cout << "[Client] Downloading DAG from server: " << http_server << "/dag/download -> " << info.filename << "...\n";
+        std::cout << "[Client] Requesting DAG from server: " << http_server << "/dag/download -> " << info.filename << "...\n";
         // Parse HTTP server host and port
         std::string host = "127.0.0.1";
         int port = 8080;
@@ -151,6 +156,37 @@ public:
         }
     }
 
+    void prepare_epoch(uint32_t epoch) {
+        mining_paused.store(true);
+        dag_loaded.store(false);
+        std::cout << "[Client] Preparing epoch " << epoch << "...\n";
+        active_epoch = epoch;
+
+        // 1. Ensure DAG binary is present on local disk (either cached or downloaded via HTTP)
+        download_dag_if_needed(epoch);
+
+        std::string dag_path = kawpow::find_cached_dag_path(epoch, cache_dir);
+        if (dag_path.empty()) {
+            std::cerr << "[Client] Error: DAG file for epoch " << epoch << " not found on disk.\n";
+            return;
+        }
+
+        auto info = kawpow::get_epoch_info(epoch);
+
+        // 2. Load DAG into GPU VRAM for each GPU before starting/resuming mining loop
+        std::cout << "[Client] Loading DAG into VRAM for " << gpu_dag_buffers.size() << " GPU(s)...\n";
+        for (auto& buf : gpu_dag_buffers) {
+            if (!buf->load_dag_from_file(dag_path, info.dag_bytes)) {
+                std::cerr << "[Client] Failed to load DAG into GPU " << buf->gpu_id << " VRAM!\n";
+                return;
+            }
+        }
+
+        std::cout << "[Client] All GPUs loaded with Epoch " << epoch << " DAG! Ready to mine.\n";
+        dag_loaded.store(true);
+        mining_paused.store(false);
+    }
+
     void share_sender_loop() {
         while (running) {
             std::string share_msg;
@@ -175,6 +211,12 @@ public:
         uint64_t total_hashes_batch = 0;
 
         while (running) {
+            // Wait until DAG is completely loaded into GPU VRAM before executing mining batches
+            if (mining_paused.load() || !dag_loaded.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+
             MiningJob job;
             {
                 std::lock_guard<std::mutex> lock(job_mutex);
@@ -228,6 +270,13 @@ public:
 
     void run() {
         init_nvml();
+
+        // Pre-allocate GPU DAG buffers for all specified GPU IDs
+        gpu_dag_buffers.clear();
+        for (int gid : gpu_ids) {
+            gpu_dag_buffers.push_back(std::make_unique<kawpow::cuda::GpuDagBuffer>(gid));
+        }
+
         std::thread t_sender([this] { share_sender_loop(); });
 
         while (running) {
@@ -254,7 +303,7 @@ public:
             });
             server_sock.send_string(reg_msg.serialize() + "\n");
 
-            // Start local GPU worker threads
+            // Start local GPU worker threads (they wait until dag_loaded == true before mining)
             std::vector<std::thread> workers;
             for (size_t i = 0; i < gpu_ids.size(); ++i) {
                 workers.emplace_back([this, idx = static_cast<int>(i)] { mining_worker_thread(idx); });
@@ -272,15 +321,21 @@ public:
                     nonce_prefix = static_cast<uint64_t>(msg.contains("np") ? msg["np"].as_int64() : msg["nonce_prefix"].as_int64());
                     uint32_t ep = static_cast<uint32_t>(msg.contains("ep") ? msg["ep"].as_int64() : msg["epoch"].as_int64());
                     std::cout << "[Client] Initialized as Client " << client_id << " (Nonce prefix: 0x" << std::hex << nonce_prefix << std::dec << ")\n";
-                    if (ep != active_epoch) {
-                        download_dag_if_needed(ep);
-                        active_epoch = ep;
+                    if (ep != active_epoch || !dag_loaded.load()) {
+                        prepare_epoch(ep);
+                    }
+                } else if (type == "epoch_transition" || type == "epoch_ready") {
+                    uint32_t ep = static_cast<uint32_t>(msg.contains("ep") ? msg["ep"].as_int64() : msg["epoch"].as_int64());
+                    std::string status = msg.contains("status") ? msg["status"].as_string() : "ready";
+                    std::cout << "[Client] Server announced epoch transition to " << ep << " (status: " << status << ")\n";
+                    if (status == "ready" && (ep != active_epoch || !dag_loaded.load())) {
+                        prepare_epoch(ep);
                     }
                 } else if (type == "job") {
                     uint32_t ep = static_cast<uint32_t>(msg.contains("ep") ? msg["ep"].as_int64() : msg["epoch"].as_int64());
-                    if (ep != active_epoch) {
-                        download_dag_if_needed(ep);
-                        active_epoch = ep;
+                    if (ep != active_epoch || !dag_loaded.load()) {
+                        std::cout << "[Client] Received job with new epoch " << ep << ". Loading DAG before mining...\n";
+                        prepare_epoch(ep);
                     }
 
                     {
