@@ -58,7 +58,6 @@ Designed for both single-machine miners and large-scale cloud GPU fleets (such a
 - **Dynamic Epoch Transitions**: Automatically detects block height epoch rollovers, generates the new DAG, updates worker VRAM, and resumes mining without downtime or manual restarts.
 - **Full Multi-GPU & Nonce Partitioning**: Spreads nonce search spaces automatically across all designated GPUs per worker rig.
 - **Real-Time NVML Telemetry**: Live reporting of per-GPU hashrate, compute utilization, memory utilization, temperature, and power consumption.
-- **High-Performance C++20 Version Available**: Includes a native C++20 CMake port (`distributed-cpp/`) with zero runtime overhead for dedicated Linux and Windows rigs.
 
 ---
 
@@ -182,10 +181,6 @@ raven_python_miner/
 │   ├── kawpow_server.py       # Stratum pool listener, HTTP DAG server, share dispatcher
 │   ├── kawpow_client.py       # Multi-GPU worker, NVML telemetry, VRAM DAG loader
 │   └── tls_utils.py           # Native TLS 1.3 context & self-signed certificate generation
-├── distributed-cpp/           # Native C++20 CMake Implementation
-│   ├── include/               # C++ header files & dynamic CUDA driver wrapper
-│   ├── src/                   # Server and client C++ source code
-│   └── CMakeLists.txt         # C++20 cross-platform build configuration
 ├── tests/                     # Test suite & verification scripts
 │   ├── test_context.py        # CUDA context initialization check
 │   ├── test_nvrtc.py          # NVRTC JIT compilation test
