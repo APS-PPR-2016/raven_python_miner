@@ -28,7 +28,10 @@ dist/
 .DS_Store
 Thumbs.db
 
+bin/
+
 # TLS private keys and local certs (if generated locally)
 *.key
 *.pem
 *.crt
+*.cer
