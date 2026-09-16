@@ -97,7 +97,7 @@ pip install -r requirements.txt
 python3 distributed/kawpow_server.py \
   --pool-host rvn.2miners.com \
   --pool-port 6060 \
-  --wallet RKAeHM7WDY5w77up4vg94Tf3tC2FjY9G5e \
+  --wallet RNGyc94iUJnYWCcshAobk2xjUYw7EvLsq4 \
   --rig-name worker_1 \
   --port 8088 \
   --http-port 8080 \
@@ -212,3 +212,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 ## ⚠️ Disclaimer
 
 This software is intended for educational, testing, and research purposes in cryptocurrency mining and GPU compute architectures. Ensure compliance with your local laws, power regulations, and hosting provider terms of service when running mining workloads.
+
+## ✨ Donate
+Generous donations can be sent to RNGyc94iUJnYWCcshAobk2xjUYw7EvLsq4
