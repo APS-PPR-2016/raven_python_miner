@@ -21,6 +21,7 @@ dist/
 *.egg-info/
 .pymagix/
 *.log
+raven_miner_cpp/
 
 # Editor & OS files
 .vscode/
