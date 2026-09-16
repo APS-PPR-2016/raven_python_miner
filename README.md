@@ -214,4 +214,4 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 This software is intended for educational, testing, and research purposes in cryptocurrency mining and GPU compute architectures. Ensure compliance with your local laws, power regulations, and hosting provider terms of service when running mining workloads.
 
 ## ✨ Donate
-Generous donations can be sent to RNGyc94iUJnYWCcshAobk2xjUYw7EvLsq4
+Generous donations are welcome to RNGyc94iUJnYWCcshAobk2xjUYw7EvLsq4
