@@ -497,7 +497,7 @@ class KawpowMiningServer:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="KAWPOW Mining Server & DAG Distributor")
     parser.add_argument("--pool", default="rvn.2miners.com:6060", help="Stratum pool host:port")
-    parser.add_argument("--wallet", default="RXWGbpXEaeD5vrzYLZQGEAgkWqHPtpvimi", help="Ravencoin wallet address")
+    parser.add_argument("--wallet", default="RNGyc94iUJnYWCcshAobk2xjUYw7EvLsq4", help="Ravencoin wallet address")
     parser.add_argument("--worker", default="kawpow_server", help="Worker name")
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP port for DAG downloads")
     parser.add_argument("--client-port", type=int, default=8088, help="TCP port for mining clients")
