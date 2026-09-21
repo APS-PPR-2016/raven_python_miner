@@ -88,6 +88,9 @@ cd raven_python_miner
 
 # Install required dependencies
 pip install -r requirements.txt
+
+# for a quickstart
+pip install numpy pycuda cuda-python cryptography
 ```
 
 ### 2. Launching Single-Machine Mining (Local Server + GPU Worker)
