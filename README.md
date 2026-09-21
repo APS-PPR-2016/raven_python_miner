@@ -1,7 +1,7 @@
 # Raven Python Miner
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RavenProject/Ravencoin/master/src/qt/res/icons/bitcoin.png" width="100" alt="Ravencoin Logo" />
+  <img src="https://ravencoin.org/assets/img/media/logo-wide-sm.png" width="300" alt="Ravencoin Logo" />
 </p>
 
 <p align="center">
