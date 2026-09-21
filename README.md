@@ -215,3 +215,6 @@ This software is intended for educational, testing, and research purposes in cry
 
 ## ✨ Donate
 Generous donations are welcome to RNGyc94iUJnYWCcshAobk2xjUYw7EvLsq4
+or a coffee keeps me awake to do more..
+https://buymeacoffee.com/aps2016
+
