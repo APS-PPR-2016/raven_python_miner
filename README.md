@@ -212,7 +212,7 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 ## ⚠️ Disclaimer
 
 This software is intended for educational, testing, and research purposes in cryptocurrency mining and GPU compute architectures. Ensure compliance with your local laws, power regulations, and hosting provider terms of service when running mining workloads.
-
+<img src="bmc_qr.png" alt="buy-me-a-coffee" />
 ## ✨ Donate
 Generous donations are welcome to RNGyc94iUJnYWCcshAobk2xjUYw7EvLsq4
 or a coffee keeps me awake to do more..
