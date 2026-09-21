@@ -215,7 +215,7 @@ This software is intended for educational, testing, and research purposes in cry
 
 ## ✨ Donate
 Generous donations are welcome to RNGyc94iUJnYWCcshAobk2xjUYw7EvLsq4
-or a coffee keeps me awake to do more..
-<img src="bmc_qr.png" alt="buy-me-a-coffee" width=150 />
+or a coffee keeps me awake to do more.. <br />
+<img src="bmc_qr.png" alt="buy-me-a-coffee" width=150 /> <br />
 https://buymeacoffee.com/aps2016
 
